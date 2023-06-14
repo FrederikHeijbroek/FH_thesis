@@ -1,0 +1,549 @@
+---
+title: "R Notebook - Visualisations "
+output: html_notebook
+author: "Frederik Heijbroek"
+---
+
+# Overview
+
+This R Notebook is for visualising the data
+
+# Libraries
+
+```{r}
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("stargazer")) install.packages("stargazer")
+if (!require("corrplot")) install.packages("corrplot")
+if (!require("xtable")) install.packages("xtable")
+if (!require("forcats")) install.packages("forcats")
+if (!require("ggthemes")) install.packages("ggthemes")
+if (!require("skimr")) install.packages("skimr")
+if (!require("DescTools")) install.packages("DescTools")
+if (!require("lmtest")) install.packages("lmtest")
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(stargazer)
+library(corrplot)
+library(xtable)
+library(forcats)
+library(ggthemes)
+library(skimr)
+library(DescTools)
+library(lmtest)
+```
+
+```{r}
+load("RData/final_df_20230605.RData")
+```
+
+# 4. Data visualisations and regression analysis
+
+## 4.1 Summary statistics 
+
+The original data set contains 8507 unique transcripts for 373 companies in the period of 2016 to 2023. The data is merged with company general information, stock price data, and data from quarterly earnings reports (EPS). After removing missing values, we keep 6381 transcripts that contain the full range of data. 
+
+final df: 6,380 × 59
+
+## 4.2 Data transformations
+
+
+```{r}
+# Change column names 
+final_df_section <- final_df_section %>% 
+  rename(AI_bigrams_Main = `count_AI_bigrams_MAIN SECTION`,
+         AI_bigrams_QA = `count_AI_bigrams_Q&A SECTION`,
+         AI_words_Main = `count_AI_words_MAIN SECTION`,
+         AI_words_QA = `count_AI_words_Q&A SECTION`,
+         RAI_bigrams_Main = `count_RAI_bigrams_MAIN SECTION`,
+         RAI_bigrams_QA = `count_RAI_bigrams_Q&A SECTION`,
+         RAI_words_Main = `count_RAI_words_MAIN SECTION`,
+         RAI_words_QA = `count_RAI_words_Q&A SECTION`,
+         AI_Main = `sum_AI_count_MAIN SECTION`,
+         AI_QA = `sum_AI_count_Q&A SECTION`,
+         RAI_Main = `sum_RAI_count_MAIN SECTION`,
+         RAI_QA = `sum_RAI_count_Q&A SECTION`,
+         CECR = capitalExpenditureCoverageRatio,
+         CAR_2day = Cumulative_Abnormal_Return_2day,
+         PriceToBookR = priceToBookRatio) %>% 
+  mutate(AI = AI_Main + AI_QA, 
+         RAI = RAI_Main + RAI_QA)
+
+```
+
+```{r}
+final_df_section <- final_df_section %>% 
+  select(transcriptID, companyName, symbol, eventName, quarterYear,
+         year, quarter, transcriptDate, totalWordCount, AI_words_Main, AI_bigrams_Main, AI_words_QA,
+         AI_bigrams_QA, RAI_words_Main, RAI_bigrams_Main, RAI_words_QA, RAI_bigrams_QA, AI_Main, AI_QA,
+         RAI_Main, RAI_QA, AI, RAI, exchange, Open_stock, High_stock, Low_stock, Close_stock, Volume_stock,
+         Return_stock, Return_rate_stock, exchangeShortName, marketSymbol, Open_market, High_market, 
+         Low_market, Close_market, Volume_market, Adjusted, Return_market, Return_rate_market, Alpha,
+         Beta, Expected_Return, Abnormal_Return, CAR_2day, mktCap, industry, sector, country,
+         revenue, eps, reportedEPS, estimatedEPS, surprise, surprisePercentage, currentRatio, 
+         returnOnAssets, returnOnEquity, debtRatio, CECR, PriceToBookR)
+
+```
+
+
+```{r}
+# Run `final_df_sum for: final_df_section
+
+# Create new column numerical quarter and yearQuarter variable
+final_df_sum <- final_df_section %>%
+  mutate(yearQuarterNumeric = year + (quarter - 1) / 4,
+         yearQuarter = paste0(year, " Q", quarter))
+
+
+# Region factor 
+# Define the country codes for each region
+north_america_codes <- c("US", "CA", "MX")
+europe_codes <- c("GB", "DE", "FR", "IT", "ES", "NL", "CH", "SE", "NO", "BE", 
+                  "AT", "IE", "PT", "FI", "DK", "GR", "CZ", "HU", "PL", "RO", 
+                  "SK", "SI", "EE", "LV", "LT", "MT", "LU", "CY", "BG", "HR")
+asia_codes <- c("JP", "CN", "IN", "KR", "ID", "VN", "TH", "PH", "MY", "SG", 
+                "HK", "TW", "PK", "BD", "MM", "KH", "LA", "MO", "BN", "MV", 
+                "BT", "NP", "TL", "MN")
+
+
+# Create a new factor variable based on the country codes
+final_df_sum <- final_df_sum %>%
+  mutate(region = ifelse(country %in% north_america_codes, "North America",
+                         ifelse(country %in% europe_codes, "Europe",
+                                ifelse(country %in% asia_codes, "Asia", "Other"))))
+
+
+# Convert the 'region', 'sector' and 'yearQuarter' columns to a factor
+final_df_sum$region <- as.factor(final_df_sum$region)
+final_df_sum$sector <- as.factor(final_df_sum$sector)
+final_df_sum$yearQuarter <- as.factor(final_df_sum$yearQuarter)
+final_df_sum$year <- as.factor(final_df_sum$year)
+
+final_df_sum$region <- relevel(final_df_sum$region, ref = "Other")
+
+
+# Tech dummy
+final_df_sum$tech_dummy <- ifelse(final_df_sum$sector == "Technology", 1, 0)
+
+
+# Convert to numeric variables
+final_df_sum$reportedEPS <- as.numeric(final_df_sum$reportedEPS)
+final_df_sum$estimatedEPS <- as.numeric(final_df_sum$estimatedEPS)
+final_df_sum$surprise <- as.numeric(final_df_sum$surprise)
+final_df_sum$surprisePercentage <- as.numeric(final_df_sum$surprisePercentage)
+
+
+# AI disclosure (normalized)
+final_df_sum <- final_df_sum %>% 
+  mutate(AI_Main_n = (`AI_Main` / totalWordCount)*500,
+         AI_QA_n = (`AI_QA` / totalWordCount)*500,
+         RAI_Main_n = (`RAI_Main` / totalWordCount)*500,
+         RAI_QA_n = (`RAI_QA` / totalWordCount)*500,
+         AI_n = (AI / totalWordCount)*500,
+         RAI_n = (RAI / totalWordCount)*500)
+
+
+final_df_sum <- final_df_sum %>% 
+  mutate(AI_words_Main_n = (`AI_words_Main` / totalWordCount)*500,
+         AI_bigrams_Main_n = (`AI_bigrams_Main` / totalWordCount)*500,
+         AI_words_QA_n = (`AI_words_QA` / totalWordCount)*500,
+         AI_bigrams_QA_n = (`AI_bigrams_QA` / totalWordCount)*500,
+         RAI_words_Main_n = (`RAI_words_Main` / totalWordCount)*500,
+         RAI_bigrams_Main_n = (`RAI_bigrams_Main` / totalWordCount)*500,
+         RAI_words_QA_n = (`RAI_words_QA` / totalWordCount)*500,
+         RAI_bigrams_QA_n = (`RAI_bigrams_QA` / totalWordCount)*500)
+
+
+
+```
+
+---
+
+**Select Data**
+
+```{r}
+# final_df_sum_section_select <- final_df_sum %>% 
+#  select(-High_stock, -Low_stock, -Low_market, -High_market, -quarter, -AI_bigrams_Main,
+#         -AI_bigrams_QA, -AI_words_Main, -AI_words_QA, -RAI_bigrams_Main, -RAI_bigrams_QA, -RAI_words_Main,
+#         -RAI_words_QA, -AI_Main, -AI_QA, -RAI_Main, -RAI_QA , AI, RAI, -tech_dummy, -yearQuarterNumeric, -Alpha, -Beta, 
+#         -Return_stock, - Return_market, -Expected_Return, -Adjusted, -Open_market, -Close_market, 
+#         -Open_stock, -Open_market)
+
+
+final_df_sum_section_select <- final_df_sum
+
+```
+
+
+**Normalizaiton**
+
+*Market Cap*
+
+```{r}
+# Apply log transformation
+final_df_sum_section_select <- final_df_sum_section_select %>%
+  mutate(log_mktCap = log(mktCap))
+
+# Calculate minimum and maximum values of the log_mktCap column
+min_log_mktCap <- min(final_df_sum_section_select$log_mktCap)
+max_log_mktCap <- max(final_df_sum_section_select$log_mktCap)
+
+# Check if the minimum and maximum values are valid
+cat("Minimum value:", min_log_mktCap, "\n")
+cat("Maximum value:", max_log_mktCap, "\n")
+
+# Apply normalization
+final_df_sum_section_select <- final_df_sum_section_select %>%
+  mutate(log_mktCap_norm = (log_mktCap - min_log_mktCap) / (max_log_mktCap - min_log_mktCap))
+
+```
+
+**Outliers**
+
+```{r}
+ggplot(data = final_df_sum_section_select, aes(y = log_mktCap_norm, x = CAR_2day)) +
+  geom_point()
+
+ggplot(data = final_df_sum_section_select, aes(y = CAR_2day, x = AI_n)) +
+  geom_point()
+ggplot(data = final_df_sum_section_select, aes(y = surprise, x = CAR_2day)) +
+  geom_point()
+ggplot(data = final_df_sum_section_select, aes(y = PriceToBookR, x = CAR_2day)) +
+  geom_point()
+ggplot(data = final_df_sum_section_select, aes(y = PriceToBookR, x = CAR_2day)) +
+  geom_point()
+ggplot(data = final_df_sum_section_select, aes(y = PriceToBookR, x = CAR_2day)) +
+  geom_point()
+
+
+```
+
+```{r}
+ggplot(data = final_df_sum_section_select, aes(y = CAR_2day)) +
+  geom_boxplot()
+```
+
+
+**Winsorizing**
+
+*Control variables*
+
+```{r}
+# controls 
+final_df_sum_section_select$surprise <- Winsorize(final_df_sum_section_select$surprise, probs = c(0.05, 0.95), na.rm = T) 
+final_df_sum_section_select$surprisePercentage <- Winsorize(final_df_sum_section_select$surprisePercentage, probs = c(0.05, 0.95), na.rm = T) 
+final_df_sum_section_select$currentRatio <- Winsorize(final_df_sum_section_select$currentRatio, probs = c(0.05, 0.95), na.rm = T) 
+final_df_sum_section_select$returnOnAssets <- Winsorize(final_df_sum_section_select$returnOnAssets, probs = c(0.05, 0.95), na.rm = T) 
+final_df_sum_section_select$returnOnEquity <- Winsorize(final_df_sum_section_select$returnOnEquity, probs = c(0.05, 0.95), na.rm = T) 
+final_df_sum_section_select$debtRatio <- Winsorize(final_df_sum_section_select$debtRatio, probs = c(0.05, 0.95), na.rm = T) 
+final_df_sum_section_select$CECR <- Winsorize(final_df_sum_section_select$CECR, probs = c(0.05, 0.95), na.rm = T) 
+final_df_sum_section_select$PriceToBookR <- Winsorize(final_df_sum_section_select$PriceToBookR, probs = c(0.05, 0.95), na.rm = T) 
+
+
+```
+
+## 4.3 Exploratory Analysis
+
+### Summary statistics 
+
+```{r}
+mean(final_df_sum$totalWordCount)
+
+```
+
+```{r}
+numeric_final_df_sum <- final_df_sum_section_select[sapply(final_df_sum_section_select, is.numeric)]
+str(final_df_sum_section_select)
+```
+
+
+```{r}
+# Re-scale volume_stock and volume_market
+numeric_final_df_sum$Volume_stock <- numeric_final_df_sum$Volume_stock / 1e6
+numeric_final_df_sum$Volume_market <- numeric_final_df_sum$Volume_market / 1e6
+numeric_final_df_sum$mktCap <- numeric_final_df_sum$mktCap / 1e9
+numeric_final_df_sum$revenue <- numeric_final_df_sum$revenue / 1e9
+
+# Calculate summary statistics for the numeric_final_df_sum data frame
+summary_stats <- data.frame(
+  Variable = colnames(numeric_final_df_sum),
+  N = sapply(numeric_final_df_sum, function(x) sum(!is.na(x))),
+  Mean = sapply(numeric_final_df_sum, function(x) mean(x, na.rm = TRUE)),
+  SD = sapply(numeric_final_df_sum, function(x) sd(x, na.rm = TRUE)),
+  Min = sapply(numeric_final_df_sum, function(x) min(x, na.rm = TRUE)),
+  Max = sapply(numeric_final_df_sum, function(x) max(x, na.rm = TRUE)),
+  Median = sapply(numeric_final_df_sum, function(x) median(x, na.rm = TRUE))
+)
+
+stargazer(summary_stats, summary = FALSE, 
+          title = "Summary Statistics", 
+          type = 'latex',
+          label = "tab:summary_stats",
+          table.placement = "!htbp",
+          header = FALSE,
+          latex.options = "scale=0.75",
+          column.labels = c("N", "Mean", "SD", "Min", "Max", "Median"))
+
+```
+
+```{r}
+length(which(!is.na(numeric_final_df_sum$estimatedEPS)))
+```
+
+
+```{r}
+# Get the list of variables in the data frame
+variable_list <- names(final_df_sum_section_select)
+
+# Print the list of variables
+variable_list
+```
+
+### Transcript and AI count distribution
+
+```{r}
+# Calculate the summary statistics for the quarterNumeric column
+summary_stats <- final_df %>%
+#  filter(!is.na(year) & !is.na(quarter)) %>% 
+  group_by(year, quarter) %>%
+  summarise(count = n()) %>% 
+  select(year, quarter, count) %>% 
+  ungroup()
+
+print(summary_stats)
+
+# Display the summary statistics table using the stargazer package
+stargazer(summary_stats, type = "latex", summary = FALSE, 
+          title = "Summary Statistics: Quarter-Year and Transcripts",
+          rownames = FALSE)
+```
+
+
+```{r}
+library(xtable)
+xtable(head(final_df), caption = "Head of final_df") %>%
+  print(tex = "table")
+```
+
+### Transcript and AI word count distribution - per sector
+
+```{r}
+sector_summary <- final_df_sum %>%
+  group_by(sector) %>%
+  summarise(Count = n(),
+            Sum_AI = sum(AI), 
+            Sum_RAI = sum(RAI)) %>%
+  rename(Sector = sector)
+
+# Add a total row to the sector_summary data frame
+sector_summary_with_total <- sector_summary %>%
+  add_row(Sector = "Total",
+          Count = sum(sector_summary$Count),
+          Sum_AI = sum(sector_summary$AI),
+          Sum_RAI = sum(sector_summary$RAI))
+
+# Create a table with xtable
+industry_table <- xtable(sector_summary_with_total, caption = "Sum of AI and RAI counts by Sector")
+print(industry_table, include.rownames = FALSE, include.colnames = TRUE, floating = FALSE)
+
+```
+
+### Transcript and AI word count distribution - per yearQuarter
+
+```{r}
+# Summarize the data by yearQuarter
+summary_df <- final_df_sum %>%
+  group_by(yearQuarter) %>%
+  summarize(AI_count = sum(AI),
+            RAI_count = sum(RAI),
+            transcript_count = n())
+
+
+# Create the line and bar plot
+plot_distribution_count <- ggplot() +
+  geom_bar(data = summary_df, aes(x = yearQuarter, y = transcript_count), stat = "identity", alpha = 0.3, fill = "blue") +
+  geom_line(data = summary_df, aes(x = yearQuarter, y = AI_count, color = "AI count", group = 1)) +
+  geom_line(data = summary_df, aes(x = yearQuarter, y = RAI_count, color = "RAI count", group = 1)) +
+  labs(
+    # title = "AI and RAI Word Count and Transcript Distribution over Time",
+       x = "Date",
+       y = "Count",
+       color = "Legend") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        legend.position = "bottom")  # Move the legend to the bottom
+
+
+# Save the plot as a PNG file
+ggsave("Output/plot_distribution_count.png", plot_distribution_count, width = 10, height = 6, dpi = 300)
+
+```
+
+### Transcript and AI word count distribution - per region
+
+```{r}
+region_summary <- final_df_sum %>%
+  group_by(region) %>%
+  summarise(Count = n(),
+            `AI count` = sum(AI), 
+            `RAI count` = sum(RAI)) %>%
+  rename(Region = region)
+
+# Add a total row to the region_summary data frame
+region_summary_with_total <- region_summary %>%
+  add_row(Region = "Total",
+          Count = sum(region_summary$Count),
+          `AI count` = sum(region_summary$`AI count`),
+          `RAI count` = sum(region_summary$`RAI count`))
+
+# Create a table with xtable
+region_table <- xtable(region_summary_with_total, caption = "Sum of AI and RAI counts by Region")
+print(region_table, include.rownames = FALSE, include.colnames = TRUE, floating = FALSE)
+
+```
+
+
+## 4.4 CAR relationships  
+
+### Correlation plot
+
+
+```{r}
+# Select required columns
+selected_df <- final_df_sum_section_select[c("CAR_2day", "AI_Main_n", "AI_QA_n", "RAI_Main_n", "RAI_QA_n", "surprise", "log_mktCap")]
+
+# Exclude rows with missing values
+complete_data <- selected_df[complete.cases(selected_df), ]
+
+# Create correlation matrix
+cor_mat <- round(cor(complete_data), 2)
+
+# Create p-value matrix
+p_mat <- round(cor.mtest(complete_data)$p, 3)
+
+# Create correlation plot
+corrplot(cor_mat, p.mat = p_mat, insig = "blank", method = "color", diag = FALSE)
+
+# Set upper triangular part to NA
+cor_mat[upper.tri(cor_mat)] <- NA
+p_mat[upper.tri(p_mat)] <- NA
+
+# Add significance levels as asterisks
+for(i in 1:nrow(cor_mat)) {
+  for(j in 1:ncol(cor_mat)) {
+    if(!is.na(p_mat[i,j])) {
+      if(p_mat[i,j] < 0.01) {
+        cor_mat[i,j] <- paste(cor_mat[i,j], "***")
+      } else if(p_mat[i,j] < 0.05) {
+        cor_mat[i,j] <- paste(cor_mat[i,j], "**")
+      } else if(p_mat[i,j] < 0.1) {
+        cor_mat[i,j] <- paste(cor_mat[i,j], "*")
+      }
+    }
+  }
+}
+
+# Create table with xtable
+tab <- xtable(cor_mat, caption = "Correlation matrix with significance levels")
+print(tab, include.rownames = TRUE, include.colnames = TRUE, floating = FALSE, sanitize.text.function = function(x) {x})
+
+# Add title and significance level labels
+cat("\nSignificance levels:\n")
+cat("  '***' 0.01\n  '**' 0.05\n  '*' 0.1\n")
+
+```
+
+Analysis steps (Before regression)
+
+### Regression output
+
+Other control variables: 
+- country + Alpha + Beta + Expected_Return + revenue
+
+```{r}
+# Create the regression table
+model_all <- lm(CAR_2day ~ AI_n + RAI_n + surprise
+                  + currentRatio + returnOnAssets + returnOnEquity + debtRatio + 
+                    CECR + PriceToBookR + log_mktCap_norm, data = final_df_sum_section_select)
+model_split <- lm(CAR_2day ~ AI_Main_n + AI_QA_n + RAI_Main_n + RAI_QA_n + surprise
+                  + currentRatio + returnOnAssets + returnOnEquity + debtRatio + 
+                    CECR + PriceToBookR + log_mktCap_norm, data = final_df_sum_section_select)
+
+model_split_2 <- lm(CAR_2day ~ AI_Main_n + AI_QA_n + RAI_Main_n + RAI_QA_n + surprise
+                  + currentRatio + returnOnAssets + returnOnEquity + debtRatio + 
+                    CECR + PriceToBookR + log_mktCap_norm, data = final_df_sum_section_select)
+
+
+
+
+# Output table
+stargazer(model_all, model_split, type = 'text', no.space = TRUE) # 
+
+
+```
+
+Robustness checks
+
+Tech only sector that has positive effect on CAR
+
+```{r}
+model_region <- lm(CAR_2day ~ AI_Main_n + AI_QA_n + RAI_Main_n + RAI_QA_n + surprise
+                  + currentRatio + returnOnAssets + returnOnEquity + debtRatio + 
+                    CECR + PriceToBookR + log_mktCap_norm  + factor(region)
+                  , data = final_df_sum_section_select)
+
+model_tech <- lm(CAR_2day ~ AI_Main_n + AI_QA_n + RAI_Main_n + RAI_QA_n + surprise
+            + currentRatio + returnOnAssets + returnOnEquity + debtRatio
+            + CECR + PriceToBookR + log_mktCap_norm 
+            + factor(tech_dummy), data = final_df_sum_section_select)
+
+model_tech_interaction <- lm(CAR_2day ~ AI_Main_n*tech_dummy + AI_QA_n*tech_dummy + 
+                               RAI_Main_n*tech_dummy + RAI_QA_n*tech_dummy + surprise
+                             + currentRatio + returnOnAssets + returnOnEquity + debtRatio 
+                             + CECR + PriceToBookR + log_mktCap_norm, data = final_df_sum_section_select)
+
+
+final_df_prior_2021 <- subset(final_df_sum_section_select, year %in% c("2017", "2018"))
+
+model_tech_2021 <- lm(CAR_2day ~ AI_Main_n + AI_QA_n + RAI_Main_n + RAI_QA_n + surprise
+            + currentRatio + returnOnAssets + returnOnEquity + debtRatio
+            + CECR + PriceToBookR + log_mktCap_norm + factor(tech_dummy), data = final_df_prior_2021)
+
+
+
+
+stargazer(model_region, model_tech, model_tech_interaction, model_tech_2021, omit = c("currentRatio", "returnOnAssets", "returnOnEquity",
+                          "debtRatio", "CECR", "PriceToBookR"),
+           no.space = TRUE, type = 'latex')
+
+```
+
+
+
+### Robustness Checks
+
+```{r}
+fitted_values <- fitted(model_split)
+residuals <- resid(model_split)
+plot(fitted_values, residuals, main="Residuals vs Fitted", 
+     xlab="Fitted values", ylab="Residuals", pch=19, col="blue")
+abline(h=0, lty=2, col="red") # adds a horizontal line at zero
+
+```
+
+```{r}
+install.packages("car")
+library(car)
+vif(model_split)
+
+```
+
+```{r}
+bptest(model_split)
+```
+
+

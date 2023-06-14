@@ -1,0 +1,677 @@
+---
+title: "R Notebook - Stock data"
+output: html_notebook
+author: "Frederik Heijbroek"
+---
+
+# Overview
+
+This R Notebook is for finding and data pre-processing of the stock price data
+
+# Libraries
+
+```{r}
+if (!require("quantmod")) install.packages("quantmod")
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("magrittr")) install.packages("magrittr")
+if (!require("readr")) install.packages("readr")
+if (!require("data.table")) install.packages("data.table")
+if (!require("tidyquant")) install.packages("tidyquant")
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("progress")) install.packages("progress")
+if (!require("tidyr")) install.packages("tidyr")
+
+```
+
+
+```{r}
+library(quantmod)
+library(dplyr)
+library(magrittr)
+library(readr)
+library(data.table)
+library(tidyquant)
+library(lubridate)
+library(ggplot2)
+library(progress)
+library(tidyr)
+```
+
+# Symbol list
+
+from stock_price notebook
+
+# 3. Stock price using Yahoo Finance
+
+**Function to fetch stock data**
+
+The following function extracts the daily stock price data for companies from Yahoo Finance. `Quantmod` library is used to fetch all the stock information.
+
+```{r}
+# Function to fetch daily stock data 
+func_stock_data <- function(symbol, start_date, end_date) {
+  stock_data <- tryCatch({
+    getSymbols(Symbols = symbol, 
+               src = "yahoo", 
+               from = start_date, 
+               to = end_date, 
+               auto.assign = FALSE)
+  }, error = function(e) {
+    NULL
+  })
+  
+  if (!is.null(stock_data)) {
+    stock_data <- as.data.frame(stock_data)
+    stock_data$Symbol <- symbol
+    
+    # Handle date conversion errors
+    stock_data$Date <- tryCatch({
+      as.Date(rownames(stock_data))
+    }, error = function(e) {
+      warning(paste("Error converting dates for", symbol))
+      return(NULL)
+    })
+    
+    if (is.null(stock_data$Date)) {
+      return(NULL)
+    }
+    
+    rownames(stock_data) <- NULL
+    colnames(stock_data) <- c("Open", "High", "Low", "Close", "Volume", "Adjusted", "Symbol", "Date")
+    stock_data <- stock_data %>%
+     dplyr::select(Date, Symbol, Open, High, Low, Close, Volume)
+  }
+  
+  return(stock_data)
+}
+```
+
+We are interested in the daily stock price information from the last 7 years. The function below sets the sample period for which the daily stock price data is fetched. 
+
+```{r}
+start_date <- Sys.Date() - 365 * 7 # 7 years ago from today
+end_date <- Sys.Date() - 1 # Yesterday
+```
+
+test function
+
+```{r}
+# Test function for AAPL
+getSymbols("AAPL",
+           src = "yahoo",
+           from = start_date,
+           to = end_date,
+           auto.assign = FALSE)
+
+AAPL_try <- func_stock_data("AAPL", start_date, end_date)
+rm(AAPL_try)
+```
+
+We fetch the stock data for the symbol universe, `Transcripts_symbols`, and organise the data in a data frame.  
+
+1761 trading days in last 7 years.
+
+```{r}
+# extract stock data for the 447 companies out of the transcripts data of the last 7 years
+stock_data_list <- lapply(Transcripts_symbols, function(symbol) { 
+  cat("Fetching data for", symbol, "\n")
+  stock_data <- func_stock_data(symbol, start_date, end_date)
+  return(stock_data)
+})
+
+stock_data_df_transcripts <- do.call(rbind, stock_data_list) 
+
+```
+
+```{r}
+Transcripts_symbols
+```
+
+
+## 3.2 Exploratory analysis
+
+**Unique companies stock info**
+
+67 companies with missing stock information. 380/447 complete
+
+```{r}
+stock_data_df_transcripts %>% 
+  group_by(Symbol) %>% 
+  summarise(count = n()) %>% 
+  nrow()
+
+# str(stock_data_df_transcripts)
+
+```
+
+380
+
+There are some missing values for the daily stock price of a few companies. Remove symbols with fewer than 150 observations of daily stock data.
+
+```{r}
+# Filter out symbols with fewer than 200 observations
+stock_data_filtered <- stock_data_df_transcripts %>%
+  group_by(Symbol) %>%
+  filter(n() >= 200) %>%
+  ungroup()
+
+# Print the number of rows and the structure of the filtered data frame
+# str(stock_data_filtered)
+
+# Print the number of unique symbols in the filtered data frame
+length(unique(stock_data_filtered$Symbol)) ## 69 companies removed from original data set
+
+```
+
+378 companies with daily stock data. 2 companies removed from the original data set, which have no or too few observations.
+
+## 3.3 Data transformations
+
+Make new columns to calculate daily and two day change
+
+```{r}
+stock_data_df_transcripts_1 <- stock_data_filtered %>% 
+  mutate(Return = Close - lag(Close),
+         Return_rate = (Close - lag(Close)) / lag(Close))
+
+print(stock_data_df_transcripts_1)
+```
+
+**Removing NA's** 
+
+```{r}
+summary(stock_data_df_transcripts_1)
+
+# Remove rows with NA values using complete.cases()
+stock_data_df_transcripts_1 <- stock_data_df_transcripts_1[complete.cases(stock_data_df_transcripts_1), ]
+summary(stock_data_df_transcripts_1)
+
+```
+
+## 3.4 Market indices daily prices
+
+**Function to fetch daily market prices**
+
+```{r}
+func_market_index_data <- function(indices, start_date, end_date) {
+  index_data <- lapply(indices, function(index) {
+    data <- tryCatch(
+      tq_get(index, from = start_date, to = end_date, get = "stock.prices"),
+      error = function(e) {
+        message("Error getting data for index: ", index)
+        return(NULL)
+      }
+    )
+    return(data)
+  })
+
+  names(index_data) <- indices
+
+  return(index_data)
+}
+
+```
+
+Ticker	Market Name
+^GSPC	S&P 500 (U.S.)
+^IXIC	NASDAQ Composite (U.S.)
+^NYA	NYSE Composite (U.S.)
+^FTSE	FTSE 100 (UK)
+^GDAXI	DAX 30 (Germany)
+^FCHI	CAC 40 (France)
+^IBEX	IBEX 35 (Spain)
+^FTMIB	FTSE MIB (Italy) --> error
+^AEX	AEX Index (Netherlands)
+^OMX	OMX Stockholm 30 (Sweden)
+^N225	Nikkei 225 (Japan)
+^HSI	Hang Seng Index (Hong Kong)
+^SSEC	Shanghai Composite (China)  
+^BSESN	S&P BSE SENSEX (India)
+^ASX	ASX 200 (Australia)
+^BVSP	Bovespa (Brazil)
+^TSX	S&P/TSX Composite (Canada) 
+
+
+```{r}
+# Market indeces / proxies 
+market_indices <- c("^GSPC", "^NYA", "^IXIC")
+
+start_date <- Sys.Date() - 365 * 7 # 7 years ago from today
+end_date <- Sys.Date() - 1 # Yesterday
+
+market_index_data <- func_market_index_data(market_indices, start_date, end_date)
+market_index_df <- do.call(rbind, market_index_data)
+
+# Change column names
+new_column_names <- c("Symbol", "Date", "Open", "High", "Low", "Close", "Volume", "Adjusted")
+colnames(market_index_df) <- new_column_names
+
+```
+
+### Data transformations 
+
+```{r}
+market_index_df_1 <- market_index_df %>% 
+  mutate(Return = Close - lag(Close),
+         Return_rate = (Close - lag(Close)) / lag(Close))
+
+```
+
+
+--------------------------------------------------------------------------------
+
+## 3.4 Stock prices + Company general information - Merge 
+
+Adding to the stock data the exchange market column from the company general information data frame, notebook: (`company_financials.Rmd`). 
+
+```{r}
+stock_data_df_transcripts_2 <- stock_data_df_transcripts_1 %>% 
+  left_join(company_profiles_df_transcripts, by = c("Symbol" = "symbol")) %>% 
+  select(Date, Symbol, Open, High, Low, Close, Volume, Return, Return_rate, 
+         exchange, exchangeShortName)
+
+# Change the short name
+stock_data_df_transcripts_2 <- stock_data_df_transcripts_2 %>% 
+  mutate(marketSymbol = case_when(
+    exchangeShortName == "NYSE" ~ "^NYA",
+    exchangeShortName == "NASDAQ" ~ "^IXIC",
+    exchangeShortName == "AMEX" ~ "^NYA",
+    exchangeShortName == "PNK" ~ "^NYA",
+    TRUE ~ exchangeShortName
+  ))
+
+```
+
+## 3.5 Exchange market (Proxy) daily prices + stock daily prices - Merge
+
+Merge stock returns and market returns data frame
+
+```{r}
+# Merge stock returns and market returns
+stock_data_df_transcripts_final <- stock_data_df_transcripts_2 %>%
+  inner_join(market_index_df_1, by = c("Date" = "Date", "marketSymbol" = "Symbol"), suffix = c("_stock", "_market"))
+
+# str(stock_data_df_transcripts_final)
+print(stock_data_df_transcripts_final)
+
+rm(merged_returns,
+   stock_data_df_transcripts_1,
+   stock_data_df_transcripts_2,
+   stock_data_df_transcripts_3,
+   market_index_df_1
+   )
+
+```
+
+```{r}
+summary(stock_data_df_transcripts_final)
+
+# Remove rows with NA values using complete.cases()
+stock_data_df_transcripts_final_noNA <- stock_data_df_transcripts_final[complete.cases(stock_data_df_transcripts_final), ]
+```
+
+### subset for testing
+
+```{r}
+selected_symbols <- c("FDX", "AAPL", "A")
+
+merged_returns_selected <- merged_returns %>% 
+  filter(Symbol %in% selected_symbols)
+
+print(merged_returns_selected)
+```
+
+
+## 3.6 Find Abnormal returns
+
+**Function to find abnormal returns**
+
+Function below takes about 30 - 45 minutes 
+
+```{r}
+func_abnormal_returns <- function(data, estimation_window) {
+  # Initialize new columns in the data frame with NA values
+  data <- data %>%
+    mutate(Alpha = NA, Beta = NA, Expected_Return = NA, Abnormal_Return = NA,
+           Cumulative_Abnormal_Return_2day = NA)
+  
+  # Create a progress bar
+  # pb <- progress_bar$new(total = nrow(data) - estimation_window - 1, format = "[:bar] :percent :elapsed")
+
+  # Loop through the data frame starting from the row after the estimation window
+  for (i in (estimation_window + 1):(nrow(data) - 1)) {
+    # Extract the estimation data based on the estimation window
+    estimation_data <- data[(i - estimation_window):(i - 1), ]
+    
+    # Run a linear regression to estimate the relationship between stock and market returns
+    model <- lm(Return_rate_stock ~ Return_rate_market, data = estimation_data)
+    
+    # Extract alpha and beta coefficients from the linear regression model
+    alpha <- coef(model)["(Intercept)"]
+    beta <- coef(model)["Return_rate_market"]
+    
+    # Assign alpha and beta values to the corresponding rows in the data frame
+    data$Alpha[i] <- alpha
+    data$Beta[i] <- beta
+    
+    # Calculate the expected return and abnormal return for the current day
+    data$Expected_Return[i] <- alpha + beta * data$Return_rate_market[i]
+    data$Abnormal_Return[i] <- data$Return_rate_stock[i] - data$Expected_Return[i]
+    
+    # Update the progress bar
+    # pb$tick()
+    
+  }
+  
+  # Calculate the cumulative abnormal return for a two-day period in a separate loop
+  for (i in (estimation_window + 1):(nrow(data) - 1)) {
+    data$Cumulative_Abnormal_Return_2day[i] <- data$Abnormal_Return[i] + data$Abnormal_Return[i + 1]
+  }
+
+  # Return the modified data frame with the calculated values
+  return(data)
+}
+
+```
+
+```{r}
+head(stock_data_df_transcripts_final)
+summary(stock_data_df_transcripts_final)
+```
+
+
+```{r}
+# Group the data by Symbol and apply the function to calculate abnormal returns, Alpha, and Beta using a 100-day estimation window
+abnormal_returns_data_100 <- stock_data_df_transcripts_final %>% 
+  group_by(Symbol, exchange) %>%
+  group_modify(~ func_abnormal_returns(.x, estimation_window = 100))
+
+# Group the data by Symbol and apply the function to calculate abnormal returns, Alpha, and Beta using a 200-day estimation window
+abnormal_returns_data_50 <- stock_data_df_transcripts_final %>% 
+  group_by(Symbol, exchange) %>%
+  group_modify(~ func_abnormal_returns(.x, estimation_window = 50))
+
+# Group the data by Symbol and apply the function to calculate abnormal returns, Alpha, and Beta using a 100-day estimation window
+abnormal_returns_data_100 <- stock_data_df_transcripts_final %>% 
+  group_by(Symbol, exchange) %>%
+  group_modify(~ func_abnormal_returns(.x, estimation_window = 150))
+
+# Examine the abnormal returns data
+abnormal_returns_data_100
+abnormal_returns_data_200
+abnormal_returns_data_50
+```
+
+
+--------------------------------------
+############ Move Here ###############
+--------------------------------------
+
+```{r}
+load("RData/Abnormal_Returns")
+```
+
+
+
+# Merge 
+
+## 3.7 Transcript data + stock data - Merge
+
+Merge transcript data and stock data
+
+**Transcript data & Stock data**
+
+Here we test with different stock estimation windows: 
+- 50
+- 100
+- 200
+
+```{r}
+joined_transcripts_stock <- unique_company_transcript_complete %>% 
+  left_join(abnormal_returns_data_100, by = c("symbol" = "Symbol", "transcriptDate" = "Date")) # abnormal_returns_data_full, stock_data_df_transcripts
+
+# Main and Q&A split
+joined_transcripts_stock_section <- unique_company_transcript_section_complete_long %>% 
+  left_join(abnormal_returns_data_100, by = c("symbol" = "Symbol", "transcriptDate" = "Date")) # abnormal_returns_data_full, stock_data_df_transcripts
+
+
+print(joined_transcripts_stock)
+
+
+# Find missing rows and remove from data frame
+
+missing_rows <- joined_transcripts_stock[!complete.cases(joined_transcripts_stock), ] # 1091 missing rows 
+joined_transcripts_stock <- joined_transcripts_stock[complete.cases(joined_transcripts_stock), ]
+joined_transcripts_stock_section <- joined_transcripts_stock_section[complete.cases(joined_transcripts_stock_section), ]
+
+
+# save(stock_data_df_transcripts,
+#     joined_transcripts_stock,
+#     file = "RData/Stock_data.RData")
+```
+
+## 3.8 Company profile data + Transcript/Stock data - Merge 
+
+```{r}
+# Make selection of the general company information
+company_profiles_df_transcripts_select <- company_profiles_df_transcripts %>% 
+  select(symbol, mktCap, industry, sector, country)
+
+# Merge with the transcript and stock data frame
+joined_transcripts_stock_profile <- joined_transcripts_stock %>% 
+  left_join(company_profiles_df_transcripts_select, by = c("symbol" = "symbol"))
+
+# Merge with the transcript and stock data frame (Main and Q&A split)
+joined_transcripts_stock_profile_section <- joined_transcripts_stock_section %>% 
+  left_join(company_profiles_df_transcripts_select, by = c("symbol" = "symbol"))
+
+print(joined_transcripts_stock_profile)
+print(joined_transcripts_stock_profile_section)
+
+
+```
+
+
+--------------
+
+## 3.9 Earnings report data, EPS & Financial ratio's - Merge
+
+```{r}
+# Make selection of the earnings report data
+earnings_report_df_transcripts_select <- earnings_report_df_transcripts %>% 
+  select(date, fillingDate, acceptedDate, symbol, year, quarter, revenue, eps)
+
+# Make selection of the financials data
+financial_ratios_df_transcripts_select <- financial_ratios_df_transcripts %>% 
+  select(date, symbol, period_n, currentRatio, returnOnAssets, returnOnEquity, debtRatio, capitalExpenditureCoverageRatio, priceToBookRatio)
+
+```
+
+```{r}
+financial_ratios_df_transcripts_select <- financial_ratios_df_transcripts_select %>%
+  filter(duplicated(symbol, date))
+
+earnings_report_df_transcripts_select <- earnings_report_df_transcripts_select %>%
+  filter(duplicated(symbol, date))
+
+```
+
+```{r}
+# First join
+merged_df <- earnings_report_df_transcripts_select %>% 
+  left_join(eps_df, by = c("symbol" = "symbol", "date" = "fiscalDateEnding"))
+
+# Identify rows with NA
+na_rows <- is.na(merged_df$reportedEPS)
+na_count <- sum(na_rows) #2476 missing rows
+
+# Create a new dataframe for those rows with NAs
+merged_df_na <- merged_df[na_rows, ] %>% 
+  select(-reportedDate, -reportedEPS, -estimatedEPS, -surprise, -surprisePercentage)
+
+# Perform second join on the new data frame
+merged_df_na <- merged_df_na %>%
+  left_join(eps_df, by = c("symbol" = "symbol", "fillingDate" = "reportedDate")) %>% 
+  select(-fiscalDateEnding)
+
+na_rows <- is.na(merged_df_na$reportedEPS)
+na_count <- sum(na_rows) # 298 recovered, 2178 still missing
+
+complete_df_na <- merged_df_na[complete.cases(merged_df_na), ]
+
+complete_df_na <- complete_df_na %>% 
+  select(date, symbol, reportedEPS, estimatedEPS, surprise, surprisePercentage)
+
+merged_df <- merged_df %>% 
+  select(-reportedDate) 
+
+# First, join the two dataframes together
+df_full <- left_join(merged_df, complete_df_na, by = c("symbol", "date"))
+
+df_filled <- df_full %>%
+  mutate(
+    reportedEPS.x = ifelse(is.na(reportedEPS.x) & !is.na(reportedEPS.y), reportedEPS.y, reportedEPS.x),
+    estimatedEPS.x = ifelse(is.na(estimatedEPS.x) & !is.na(estimatedEPS.y), estimatedEPS.y, estimatedEPS.x),
+    surprise.x = ifelse(is.na(surprise.x) & !is.na(surprise.y), surprise.y, surprise.x),
+    surprisePercentage.x = ifelse(is.na(surprisePercentage.x) & !is.na(surprisePercentage.y), surprisePercentage.y, surprisePercentage.x)
+  )
+
+
+df_final <- df_filled %>%
+  select(-ends_with(".y"))
+
+df_final <- df_final %>%
+  rename_with(~ gsub("\\.x$", "", .x), ends_with(".x"))
+
+
+# Identify rows with NA
+na_rows <- is.na(df_final$reportedEPS)
+na_count <- sum(na_rows) #2178 missing rows
+
+df_final
+
+```
+
+```{r}
+earnings_report_df_transcripts_select_eps <- df_final %>% 
+  select(-fillingDate, -acceptedDate)
+
+```
+
+```{r}
+rm(complete_df_na,
+   df_filled,
+   df_final,
+   df_full,
+   merged_df,
+   merged_df_na,
+   missing_rows)
+```
+
+### Earnings report & EPS + Financial ratio's 
+
+```{r}
+# Merge earnings report and financial ratio's data
+joined_controls <- earnings_report_df_transcripts_select_eps %>% 
+  full_join(financial_ratios_df_transcripts_select, by = c("symbol" = "symbol", "date" = "date")) %>% 
+  select(-quarter)
+
+# Find duplicates based on two keys
+duplicates <- joined_controls[duplicated(paste(joined_controls$symbol, joined_controls$date)), ]
+print(duplicates)
+
+# Remove duplicates based on two keys
+joined_controls <- joined_controls[!duplicated(paste(joined_controls$symbol, joined_controls$date)), ]
+print(joined_controls)
+
+```
+
+## 3.10 Final data set: Controls (Earnings report & Financials) + Transcript/Stock/Profile data - Merge
+
+```{r}
+duplicated_rows_left <- joined_transcripts_stock_profile[duplicated(joined_transcripts_stock_profile[c("symbol", "year", "quarter")]), ]
+
+```
+
+period_n comes from the financial ratio's data. This period (quarter) is more accurate than the quarter column from the earnings report data. There are more matching earnings calls when using the period_n column.
+
+
+-------------------------------
+
+```{r}
+# Merge earnings report data with transcript, stock and company information using `symbol`, `year` `quarter`
+joined_transcripts_stock_profile_earnings <- joined_transcripts_stock_profile %>% 
+  left_join(joined_controls, by = c("symbol" = "symbol", "year" = "year", "quarter" = "period_n")) %>% 
+  select(-date)
+
+# Merge earnings report data with transcript, stock and company information using `symbol`, `year` `quarter` (Main and Q&A split)
+joined_transcripts_stock_profile_earnings_section <- joined_transcripts_stock_profile_section %>% 
+  left_join(joined_controls, by = c("symbol" = "symbol", "year" = "year", "quarter" = "period_n")) %>% 
+  select(-date)
+
+# Print final data frame
+print(joined_transcripts_stock_profile_earnings) # 7393 rows 
+print(joined_transcripts_stock_profile_earnings_section)
+
+
+```
+
+```{r}
+mismatched_rows <- joined_transcripts_stock_profile_earnings_section %>% filter(symbol != symbol_old)
+```
+
+
+### Cleaning final data frame 
+
+**Remove NA's** 
+
+```{r}
+# Final data frame (with NA)
+final_df_NA <- joined_transcripts_stock_profile_earnings
+final_df_section_NA <- joined_transcripts_stock_profile_earnings_section
+
+# Find rows with missing data
+missing_rows <- joined_transcripts_stock_profile_earnings[!complete.cases(joined_transcripts_stock_profile_earnings), ]
+
+# Count missing values in each row
+missing_counts <- rowSums(is.na(joined_transcripts_stock_profile_earnings))
+
+# Final data frame (No NA)
+final_df <- joined_transcripts_stock_profile_earnings[complete.cases(joined_transcripts_stock_profile_earnings), ]
+final_df_section <- joined_transcripts_stock_profile_earnings_section[complete.cases(joined_transcripts_stock_profile_earnings_section), ]
+
+length(unique(final_df$transcriptID))
+
+final_df %>% 
+  group_by(symbol) %>% 
+  summarise(count = n()) %>% 
+  nrow()
+
+
+# Check the result
+print(final_df) # 7132 --> 6381
+
+rm(duplicates,
+   missing_rows,
+   missing_counts)
+
+
+
+```
+
+**Saving and loading tidy data frames**
+
+```{r}
+save(joined_transcripts_stock_profile_earnings,
+     final_df_section,
+     final_df,
+     file = "RData/final_df_20230605.RData")
+
+```
+
+
+
+
+
+
