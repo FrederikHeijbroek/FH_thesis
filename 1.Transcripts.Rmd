@@ -1,0 +1,1063 @@
+---
+title: "R Notebook - Data preparation Transcripts"
+output: html_notebook
+author: "Frederik Heijbroek"
+---
+
+# Overview
+
+This R Notebook is for data pre-processing of the earnings calls data and finding the level of AI talk
+
+# Libraries
+
+Loading package
+
+```{r}
+if (!require("tibble")) install.packages("tibble")
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("rvest")) install.packages("rvest")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("readxl")) install.packages("readxl")
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("tidytext")) install.packages("tidytext")
+if (!require("tidyr")) install.packages("tidyr")
+if (!require("igraph")) install.packages("igraph")
+if (!require("ggraph")) install.packages("ggraph")
+if (!require("quantmod")) install.packages("quantmod")
+if (!require("pdftools")) install.packages("pdftools")
+if (!require("lubridate")) install.packages("lubridate")
+```
+
+
+```{r}
+library(tibble)
+library(tidyverse)
+library(rvest)
+library(ggplot2)
+library(readxl)
+library(dplyr)
+library(tidytext)
+library(tidyr)
+library(igraph)
+library(ggraph)
+library(quantmod)
+library(pdftools)
+library(lubridate)
+```
+
+# 1. Pre-processing of earnings conference call transcripts
+
+## 1.1 Cleaning transcript data 
+
+**Loading data**
+
+```{r}
+# Load Transcript data 
+Transcripts_G500 <- read_excel("Raw data/Transcripts_G500.xlsx") %>%
+  mutate(`ROW NUMBER` = row_number()) 
+
+
+Transcripts_G500_snippet <-Transcripts_G500 %>% 
+  select(`ROW NUMBER`, `COMPANY NAME`, TITLE, `SECTION NUMBER`, TEXT) %>% 
+  slice(c(1,8,9,15,43))
+
+```
+
+symbol and date contain incorrect entries
+
+**Data cleaning**
+
+```{r}
+# Fix encoding issue with Text column
+Transcripts_G500$TEXT <- iconv(Transcripts_G500$TEXT, from = "UTF-8", to = "ASCII", sub = "")
+
+# Change column names 
+Transcripts_G500 <- Transcripts_G500 %>% 
+  rename(companyName = `COMPANY NAME`,
+         symbol = SYMBOL,
+         eventName = TITLE,
+         transcriptDateTimeUploadSA = DATE,
+         componentNumber = `SECTION NUMBER`,
+         text = TEXT)
+
+# Convert the `transcriptDateTimeUploadSA` column to a date-time object with timezone
+Transcripts_G500$transcriptDateTimeUploadSA <- mdy_hm(Transcripts_G500$transcriptDateTimeUploadSA, tz = "US/Eastern")
+Transcripts_G500$transcriptDateUploadSA <- as.Date(force_tz(Transcripts_G500$transcriptDateTimeUploadSA), tzone = "US/Eastern")
+
+# Change `componentNumber` into two columns: Section and Number
+Transcripts_G500 <- Transcripts_G500 %>% 
+  separate(componentNumber, into = c("transcriptSection", "componentNumber"), sep = " - ")
+
+# Change the data type 
+Transcripts_G500$componentNumber <- gsub("PART ", "", Transcripts_G500$componentNumber)
+Transcripts_G500$componentNumber <- as.numeric(Transcripts_G500$componentNumber)
+
+# Create component number for all components per transcript
+Transcripts_G500 <- Transcripts_G500 %>% 
+  group_by(symbol, transcriptDateUploadSA) %>% 
+  mutate(componentNumberFull = row_number()) %>% 
+  ungroup()
+
+# Extract quarter and year from the eventName column
+Transcripts_G500$quarterYear <- str_extract(Transcripts_G500$eventName, "Q\\d\\s*(Fiscal )?(Year )?\\d{4}") 
+Transcripts_G500$quarterYear <- str_replace(Transcripts_G500$quarterYear, "Fiscal (Year )?", "")
+
+# Extract symbol and company Name from eventName column
+
+# Extract the ticker symbol from the eventName column
+Transcripts_G500 <- Transcripts_G500 %>% mutate(symbolExtract = str_extract(eventName, "\\[[A-Z]+\\]|\\([A-Z]+\\)"))
+
+# Remove the brackets from the extracted symbol
+Transcripts_G500 <- Transcripts_G500 %>% mutate(symbolExtract = str_replace_all(symbolExtract, "\\[|\\]|\\(|\\)", ""))
+
+#### missing_rows <- Transcripts_G500 %>% filter(is.na(symbolExtract))
+
+# Fill missing values with values form symbol
+Transcripts_G500$symbolExtract <- ifelse(is.na(Transcripts_G500$symbolExtract), Transcripts_G500$symbol, Transcripts_G500$symbolExtract)
+
+#### mismatched_rows <- Transcripts_G500 %>% filter(symbol != symbolExtract)
+
+# Extract the company name by removing the ticker symbol and everything after it
+Transcripts_G500 <- Transcripts_G500 %>% mutate(companyNameExtracted = str_remove(eventName, paste0("\\s*(\\[|\\()", symbolExtract, "(\\]|\\)).*$")))
+
+
+# Rename original symbol column
+Transcripts_G500 <- Transcripts_G500 %>% 
+  rename(symbol_old = symbol) %>% 
+  rename(symbol = symbolExtract) %>% 
+  rename(companyName_old = companyName) %>% 
+  rename(companyName = companyNameExtracted)
+
+# Checking rows with missing quarterYear values
+rows_with_na <- which(is.na(Transcripts_G500$quarterYear)) # 757 missing quarterYear values 
+rm(rows_with_na)
+
+# Change the data type of of `quarterYear` column
+Transcripts_G500$quarterYear <- as.factor(Transcripts_G500$quarterYear)
+
+# Create a unique Transcript ID for all the companies for each earnings call transcript
+Transcripts_G500 <- Transcripts_G500 %>% 
+  mutate(symbol_date = paste0(symbol, "-", transcriptDateTimeUploadSA))
+
+# Assign a numeric transcript ID to all the symbol_date combinations
+Transcripts_G500 <- Transcripts_G500 %>% 
+  mutate(transcriptID = as.numeric(factor(symbol_date))) %>% 
+  select(-symbol_date)
+
+# Split the quarterYear column into year and quarter
+Transcripts_G500 <- Transcripts_G500 %>%
+  mutate(year = as.numeric(str_extract(quarterYear, "\\d{4}")),
+         quarter = as.numeric(str_extract(quarterYear, "\\d")))
+
+# Reorder the columns of the data frame
+Transcripts_G500 <- Transcripts_G500 %>% 
+  select(companyName, symbol, symbol_old, transcriptID, eventName, quarterYear, year, quarter, transcriptDateTimeUploadSA, transcriptDateUploadSA, transcriptSection,
+         componentNumber, componentNumberFull, text)
+
+
+```
+
+
+**Checking clean data set**
+
+```{r}
+# Checking the unique number of Transcript IDS
+length(unique(Transcripts_G500$transcriptID)) # 8507 unique transcripts
+
+# Checking the unique number of companies and creating a symbol list
+length(unique(Transcripts_G500$symbol)) # 447
+
+# Symbol list 
+Transcripts_symbols <- unique(Transcripts_G500$symbol) 
+
+# Checking unique symbol and transcriptDate combination
+Transcripts_G500 %>%
+  distinct(symbol, transcriptDateTimeUploadSA)
+
+# Transcript without NA's
+Transcripts_G500_without_NA <- Transcripts_G500 %>% 
+  filter(!is.na(text))
+
+# Checking data pre-processing steps
+head(Transcripts_G500)
+str(Transcripts_G500)
+head(Transcripts_G500_without_NA)
+str(Transcripts_G500_without_NA)
+
+```
+
+There are 8507 unique transcripts for 447 companies out of the Global 500 list in the period 2016 - 2023.
+
+Some transcript ID's had multiple earnings call transcripts. This was caused by two earnings calls that happened on the same day for the same company, e.g. a company that is part of another company. Therefore the transcript ID creation should be created on transcriptDateTime to ensure each transcript has a unique ID.
+
+**Data cleaning (2) and data manipulation** 
+
+New earnings conference call date and time is extracted from the the (transcript) `text` column. The `text` column contains the full transcript of the earnings call, and always starts with the title and date of the conference call. The original date and time column shows the date and time the transcript is uploaded on Seeking Alpha (SA). There is sometimes a delay between the event (earnings call) and the upload on SA. Therefore, the new date is extracted, which is required for the subsequent event study analysis. 
+
+```{r}
+# Extract transcript date from text column
+Transcripts_G500_without_NA <- Transcripts_G500_without_NA %>% 
+  mutate(
+    transcriptDateExtracted = if_else(componentNumberFull == 1,
+                                      str_extract(text,
+                                                  "\\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\\s+\\d{1,2},\\s+\\d{4}\\s+\\d{1,2}:\\d{2}\\s+[AP]M\\s+ET"),
+                                      NA_character_))
+
+
+# Convert the `transcriptDateTimeUploadSA` column to a date-time object with timezone
+Transcripts_G500_without_NA$transcriptDateTime <- mdy_hm(Transcripts_G500_without_NA$transcriptDateExtracted, tz = "US/Eastern")
+Transcripts_G500_without_NA$transcriptDate <- as.Date(force_tz(Transcripts_G500_without_NA$transcriptDateTime), tzone = "US/Eastern")
+
+
+# Fill in missing dates
+Transcripts_G500_without_NA <- Transcripts_G500_without_NA %>%
+  group_by(transcriptID) %>%
+  mutate(transcriptDate = ifelse(is.na(transcriptDate), first(transcriptDate, default = NA_real_), as.numeric(transcriptDate)),
+         transcriptDateTime = ifelse(is.na(transcriptDateTime), first(transcriptDateTime, default = NA_real_), as.numeric(transcriptDateTime))) %>%
+  mutate(transcriptDate = as.Date(transcriptDate, origin = "1970-01-01"),
+         transcriptDateTime = as.POSIXct(transcriptDateTime, origin = "1970-01-01", tz = "US/Eastern")) %>%
+  ungroup()
+
+
+```
+
+
+
+```{r}
+# Find word count 
+Transcripts_G500_without_NA <- Transcripts_G500_without_NA %>% 
+  mutate(wordCount = str_count(text, "\\S+"))
+
+Transcripts_G500_without_NA <- Transcripts_G500_without_NA %>%
+  group_by(transcriptID) %>%
+  mutate(totalWordCount = sum(wordCount))
+
+```
+
+**Unique company/transcript data frame**
+
+```{r}
+unique_company_transcript <- Transcripts_G500_without_NA %>% distinct(transcriptID, .keep_all = TRUE) %>% 
+  select(-wordCount, -componentNumber, -componentNumberFull, -transcriptDateExtracted, -transcriptSection, -transcriptDateTimeUploadSA)
+
+unique_company_transcript
+
+unique_company_transcript_section <- Transcripts_G500_without_NA %>% distinct(transcriptID, transcriptSection, .keep_all = TRUE) %>% 
+  select(-text, -wordCount,-componentNumber, -componentNumberFull, -transcriptDateExtracted, -transcriptDateTimeUploadSA)
+
+head(unique_company_transcript)
+
+
+```
+
+Find rows with missing values
+
+```{r}
+missing_rows <- unique_company_transcript[!complete.cases(unique_company_transcript), ] # 141 observations with missing values 
+
+rm(missing_rows)
+```
+
+**Saving and loading clean data frames**
+
+```{r}
+save(Transcripts_G500,
+     Transcripts_G500_without_NA,
+     unique_company_transcript,
+     unique_company_transcript_section,
+     file = "RData/Transcripts_G500_20230605.RData")
+```
+
+```{r}
+load("RData/Transcripts_G500_20230605.RData")
+```
+
+# 1.2 Exploratory statistics
+
+```{r}
+# Find summary statistics 
+summary(unique_company_transcript$quarterYear)
+
+```
+
+# Split data into subsets 
+
+**Split data into subsets**
+
+Splitting into subsets is necessary when converting the text into one word per row (tokenizing) for computational reasons 
+
+```{r}
+# first 10000
+batch_1 <- Transcripts_G500_without_NA %>% 
+  slice(1:2500)
+
+# second 10000
+batch_2 <- Transcripts_G500_without_NA %>% 
+  slice(2501:5000)
+
+# third 10000
+batch_3 <- Transcripts_G500_without_NA %>% 
+  slice(5001:7500)
+
+# fourth 10000
+batch_4 <- Transcripts_G500_without_NA %>% 
+  slice(7501:10000)
+
+# fifth 10000
+batch_5 <- Transcripts_G500_without_NA %>% 
+  slice(10001:12500)
+
+# sixth 10000
+batch_6 <- Transcripts_G500_without_NA %>% 
+  slice(12501:15000)
+
+# seventh 10000
+batch_7 <- Transcripts_G500_without_NA %>% 
+  slice(15001:17500)
+
+# eight 10000
+batch_8 <- Transcripts_G500_without_NA %>% 
+  slice(17501:20000)
+
+# ninth 10000
+batch_9 <- Transcripts_G500_without_NA %>% 
+  slice(20001:22500)
+
+# tenth 10000
+batch_10 <- Transcripts_G500_without_NA %>% 
+  slice(22501:25000)
+
+# eleventh 10000
+batch_11 <- Transcripts_G500_without_NA %>% 
+  slice(25001:27546)
+
+```
+
+# 1.3 Tidy Text 
+
+## Tidy text format (unigrams)
+
+Processing the data to a tidy format, tokenizing by word. 
+
+Skip to line 441 to load the tidy data frame. 
+
+**Function to find AI words**
+
+```{r}
+# Define the function
+process_batch <- function(batch) {
+  # Load stop words
+  data("stop_words")
+  
+  # Process the batch
+  tidy_df <- batch %>% 
+    unnest_tokens(word, text) %>%
+    mutate(word = ifelse(str_detect(word, "(?<=\\D)\\.(?=\\D)"), 
+                         str_replace_all(word, "\\.", "|"), word)) %>%
+    separate_rows(word, sep = "\\|") 
+  
+  # Remove stop words
+  tidy_df_clean <- tidy_df %>% 
+    anti_join(stop_words)
+  
+  return(tidy_df_clean)
+}
+
+
+```
+
+```{r}
+Transcripts_tidy_df_batch_1_clean <- process_batch(batch_1)
+Transcripts_tidy_df_batch_2_clean <- process_batch(batch_2)
+Transcripts_tidy_df_batch_3_clean <- process_batch(batch_3)
+Transcripts_tidy_df_batch_4_clean <- process_batch(batch_4)
+Transcripts_tidy_df_batch_5_clean <- process_batch(batch_5)
+Transcripts_tidy_df_batch_6_clean <- process_batch(batch_6)
+Transcripts_tidy_df_batch_7_clean <- process_batch(batch_7)
+Transcripts_tidy_df_batch_8_clean <- process_batch(batch_8)
+Transcripts_tidy_df_batch_9_clean <- process_batch(batch_9)
+Transcripts_tidy_df_batch_10_clean <- process_batch(batch_10)
+Transcripts_tidy_df_batch_11_clean <- process_batch(batch_11)
+```
+
+```{r}
+Transcripts_tidy_df_joined <- bind_rows(
+  Transcripts_tidy_df_batch_1_clean,
+  Transcripts_tidy_df_batch_2_clean,
+  Transcripts_tidy_df_batch_3_clean,
+  Transcripts_tidy_df_batch_4_clean,
+  Transcripts_tidy_df_batch_5_clean,
+  Transcripts_tidy_df_batch_6_clean,
+  Transcripts_tidy_df_batch_7_clean,
+  Transcripts_tidy_df_batch_8_clean,
+  Transcripts_tidy_df_batch_9_clean,
+  Transcripts_tidy_df_batch_10_clean,
+  Transcripts_tidy_df_batch_11_clean
+)
+```
+
+
+**Saving and loading tidy data frames**
+
+```{r}
+save(Transcripts_tidy_df_batch_1_clean,
+     Transcripts_tidy_df_batch_2_clean,
+     Transcripts_tidy_df_batch_3_clean,
+     Transcripts_tidy_df_batch_4_clean,
+     Transcripts_tidy_df_batch_5_clean,
+     Transcripts_tidy_df_batch_6_clean,
+     Transcripts_tidy_df_batch_7_clean,
+     Transcripts_tidy_df_batch_8_clean,
+     Transcripts_tidy_df_batch_9_clean,
+     Transcripts_tidy_df_batch_10_clean,
+     Transcripts_tidy_df_batch_11_clean,
+     file = "RData/Transcripts_tidy_df_1_11.RData")
+```
+
+```{r}
+save(Transcripts_tidy_df_joined,
+     file = "RData/Transcripts_tidy_df_joined.RData")  
+
+```
+
+```{r}
+load("RData/Transcripts_tidy_df_joined.RData")
+```
+
+### Exploratory analysis
+
+**Word frequencies**
+
+```{r}
+Transcripts_tidy_df_joined %>%                                                                                                                                                                            
+  count(word, sort = TRUE)
+
+head(Transcripts_tidy_df_joined)
+length(unique(Transcripts_tidy_df_joined$transcriptID))
+
+
+```
+
+**Most common terms**
+
+```{r}
+Transcripts_tidy_df_joined %>% 
+  count(word, sort = TRUE) %>% 
+  top_n(20) %>% 
+#  filter(n > 100000) %>% 
+  mutate(word = reorder(word, n)) %>% 
+  ggplot(aes(n, word)) + 
+  geom_col() +
+  labs(y = NULL)
+```
+
+## Tidy text format (Bigrams)
+
+Processing the data to a tidy format, we tokenize into two consecutive word - bigrams. We then examine the bigrams
+
+**Function to find AI bigrams**
+
+```{r}
+# Define the function
+process_batch_bigram <- function(batch) {
+  # Load stop words
+  data("stop_words")
+  
+  # Process the batch
+  tidy_df <- batch %>% 
+    unnest_tokens(bigram, text, token = "ngrams", n = 2) %>%
+    mutate(bigram = ifelse(str_detect(bigram, "(?<=\\D)\\.(?=\\D)"), 
+                         str_replace_all(bigram, "\\.", "|"), bigram)) %>%
+    separate_rows(bigram, sep = "\\|") %>% # split words with a full stop that separates them. Numbers that are split with a full stop remain
+#    filter(!is.na(bigram)) %>% 
+    filter(str_detect(bigram, "\\s"))
+  
+  # separate words from bigram into two columns
+  bigram_seperated <- tidy_df %>% 
+    separate(bigram, c("word1", "word2"), sep = " ")
+  
+  # remove stop words 
+  bigram_filtered <- bigram_seperated %>% 
+    filter(!word1 %in% stop_words$word) %>%
+    filter(!word2 %in% stop_words$word)
+  
+  return(bigram_filtered) # tidy_df_clean
+}
+
+```
+
+**Saving and loading clean data frames**
+
+```{r}
+Transcripts_tidy_df_batch_1_bigram <- process_batch_bigram(batch_1)
+Transcripts_tidy_df_batch_2_bigram <- process_batch_bigram(batch_2)
+Transcripts_tidy_df_batch_3_bigram <- process_batch_bigram(batch_3)
+Transcripts_tidy_df_batch_4_bigram <- process_batch_bigram(batch_4)
+Transcripts_tidy_df_batch_5_bigram <- process_batch_bigram(batch_5)
+
+save(Transcripts_tidy_df_batch_1_bigram,
+     Transcripts_tidy_df_batch_2_bigram,
+     Transcripts_tidy_df_batch_3_bigram,
+     Transcripts_tidy_df_batch_4_bigram,
+     Transcripts_tidy_df_batch_5_bigram,
+     file = "RData/Transcripts_tidy_df_batch_1_5_bigram.RData")
+
+Transcripts_tidy_df_batch_6_bigram <- process_batch_bigram(batch_6)
+Transcripts_tidy_df_batch_7_bigram <- process_batch_bigram(batch_7)
+Transcripts_tidy_df_batch_8_bigram <- process_batch_bigram(batch_8)
+Transcripts_tidy_df_batch_9_bigram <- process_batch_bigram(batch_9)
+Transcripts_tidy_df_batch_10_bigram <- process_batch_bigram(batch_10)
+Transcripts_tidy_df_batch_11_bigram <- process_batch_bigram(batch_11)
+
+save(Transcripts_tidy_df_batch_6_bigram,
+     Transcripts_tidy_df_batch_7_bigram,
+     Transcripts_tidy_df_batch_8_bigram,
+     Transcripts_tidy_df_batch_9_bigram,
+     Transcripts_tidy_df_batch_10_bigram,
+     Transcripts_tidy_df_batch_11_bigram,
+     file = "RData/Transcripts_tidy_df_batch_6_11_bigram.RData")
+
+```
+
+```{r}
+Transcripts_tidy_df_joined_bigram <- bind_rows(
+  Transcripts_tidy_df_batch_1_bigram,
+  Transcripts_tidy_df_batch_2_bigram,
+  Transcripts_tidy_df_batch_3_bigram,
+  Transcripts_tidy_df_batch_4_bigram,
+  Transcripts_tidy_df_batch_5_bigram,
+  Transcripts_tidy_df_batch_6_bigram,
+  Transcripts_tidy_df_batch_7_bigram,
+  Transcripts_tidy_df_batch_8_bigram,
+  Transcripts_tidy_df_batch_9_bigram,
+  Transcripts_tidy_df_batch_10_bigram,
+  Transcripts_tidy_df_batch_11_bigram
+  
+)
+
+save(Transcripts_tidy_df_joined_bigram,
+     file = "RData/Transcripts_tidy_df_joined_bigram.RData") 
+```
+
+```{r}
+# Remove batches of the data
+rm(batch_1,
+   batch_2,
+   batch_3,
+   batch_4,
+   batch_5,
+   batch_6,
+   batch_7,
+   batch_8,
+   batch_9,
+   batch_10,
+   batch_11)
+
+# Remove batches of the bigrams
+rm(Transcripts_tidy_df_batch_1_bigram,
+   Transcripts_tidy_df_batch_2_bigram,
+   Transcripts_tidy_df_batch_3_bigram,
+   Transcripts_tidy_df_batch_4_bigram,
+   Transcripts_tidy_df_batch_5_bigram,
+   Transcripts_tidy_df_batch_6_bigram,
+   Transcripts_tidy_df_batch_7_bigram,
+   Transcripts_tidy_df_batch_8_bigram,
+   Transcripts_tidy_df_batch_9_bigram,
+   Transcripts_tidy_df_batch_10_bigram,
+   Transcripts_tidy_df_batch_11_bigram)
+```
+
+```{r}
+load("RData/Transcripts_tidy_df_joined_bigram.RData")
+```
+
+### Exploratory analysis
+
+**Data manipulation**
+
+```{r}
+# useful to unite the words into one columns
+Transcripts_bigrams_united <- Transcripts_tidy_df_joined_bigram %>%
+  unite(bigram, word1, word2, sep = " ")
+
+# print(Transcripts_bigrams_united)
+
+```
+
+```{r}
+# Bigram count sorted from large to small
+Transcripts_bigrams_count <- Transcripts_bigrams_united %>%
+  count(bigram, sort = TRUE)
+
+head(Transcripts_bigrams_united)
+length(unique(Transcripts_bigrams_united$transcriptID))
+
+head(Transcripts_bigrams_count)
+
+rm(Transcripts_bigrams_count)
+
+```
+
+#### Tf-idf bigram analysis
+
+Term Frequency (TF): number of times the term appears in the document compared to the total number of words in the document 
+- TF = (# term appears in the document / # terms in document)
+
+Inverse Document Frequency (IDF): reflects the proportion of documents in the corpus that contain the term. Words unique to a document receive higher importance than common words across all the documents
+- IDF = log(# docs in corpus / # docs in the corpus)
+
+The tf-idf (term frequency-inverse document frequency) is a measure that reflects how relevant/important a word is to a document in a collection of a corpus of documents. It provides a weight factor to each word/bigram on the importance of the term. 
+
+The higher the numerical weight value of the tf-idf score, the rarer the term. The smaller the weight, the more common the term is. IDF is the log of the document frequency: log (n docs / m term appearance in n) i.e. log(10/3), when there are 10 documents and the term appears in 3 documents.  
+
+```{r}
+# tf-idf score for bigrams per component  
+Transcripts_bigram_tf_idf <- Transcripts_bigrams_united %>%
+  count(transcriptID, bigram) %>% # change componentOrder for Transcript ID when more transcripts come in 
+  bind_tf_idf(bigram, transcriptID, n) %>%
+  arrange(desc(tf_idf))
+
+Transcripts_bigram_tf_idf
+```
+
+#### ggraph
+
+```{r}
+Transcripts_bigrams_count
+
+# filter for only relatively common combinations 
+Transcripts_bigrams_graph <- Transcripts_bigrams_count %>%
+  filter(n > 10000) %>%
+  graph_from_data_frame()
+
+Transcripts_bigrams_graph
+
+```
+
+```{r}
+set.seed(2023)
+
+ggraph(Transcripts_bigrams_graph, layout = "fr") +
+  geom_edge_link() +
+  geom_node_point() +
+  geom_node_text(aes(label = name), vjust = 1, hjust =1)
+```
+
+# 1.4 AI and RAI disclosue
+
+## 1.4.1 AI disclosure - single word selection
+
+### Bag of words 
+
+**defining the bag of words related to AI disclosure**
+
+```{r}
+# Define the words to search for
+AI_words <- c("ai", "ml", "backpropagation", "nlp", "gan", "chatbots", "gpt", "algorithm", "robotics")
+
+# Responsible AI 
+RAI_words <- c("fairness", "accountability", "explainable", "privacy", "trustworthy", "robustness", "transparency") 
+
+```
+
+other words: robustness
+
+### Find AI disclosure  
+
+Look for the words out of the bag of words
+
+```{r}
+# Filter for AI_words
+Transcripts_AI_words_df <- Transcripts_tidy_df_joined %>% 
+  filter(word %in% AI_words)
+
+# Filter for RAI_words
+Transcripts_RAI_words_df <- Transcripts_tidy_df_joined %>% 
+  filter(word %in% RAI_words)
+
+print(Transcripts_AI_words_df)
+print(Transcripts_RAI_words_df)
+
+```
+
+#### Plot AI disclosure  
+
+```{r}
+# Count the occurrences of words and reorder them
+AI_unigram_plot <- Transcripts_AI_words_df %>%
+  count(word, sort = TRUE) %>%
+  mutate(word = fct_reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(x = NULL, y = "Frequency") +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 24, hjust = 0.5)
+  ) +
+  ggtitle("AI Unigram Frequency")
+
+ggsave("Output/AI_unigram_plot.png", AI_unigram_plot, width = 10, height = 7, units = "in")
+
+
+# Count the occurrences of words and reorder them
+RAI_unigram_plot <- Transcripts_RAI_words_df %>%
+  count(word, sort = TRUE) %>%
+  mutate(word = fct_reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(x = NULL, y = "Frequency") +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 24, hjust = 0.5)
+  ) +
+  ggtitle("RAI Unigram Frequency")
+
+ggsave("Output/RAI_unigram_plot.png", RAI_unigram_plot, width = 10, height = 7, units = "in")
+
+AI_unigram_plot
+RAI_unigram_plot
+
+rm(AI_unigram_plot,
+   RAI_unigram_plot)
+```
+
+### Summary statistics AI word count
+
+#### Per transcript 
+
+Find AI disclosure, from the defined bag of words, for each transcript per company. 
+
+```{r}
+# Group by `transcriptId` and count AI_words
+Transcripts_AI_word_summary <- Transcripts_AI_words_df %>%
+  group_by(transcriptID) %>%
+  summarize(count_AI_words = n())
+
+# Group by `transcriptId` and count AI_words
+Transcripts_RAI_word_summary <- Transcripts_RAI_words_df %>%
+  group_by(transcriptID) %>%
+  summarize(count_RAI_words = n())
+
+Transcripts_sum_AI_words <- full_join(Transcripts_AI_word_summary, 
+                                      Transcripts_RAI_word_summary,
+                                    by = c("transcriptID"))
+
+# Join back with unique transcript data frame
+unique_company_transcript_complete <- full_join(unique_company_transcript,
+                                        Transcripts_sum_AI_words,
+                                        by = c("transcriptID"))
+
+
+# Print the new data frame
+print(unique_company_transcript_complete)
+
+# Remove unnecessary data objects 
+rm(Transcripts_AI_word_summary,
+   Transcripts_RAI_word_summary,
+   Transcripts_sum_AI_words)
+
+```
+
+#### Per section
+
+Looking for words out of the bag of words per component of the transcript for each company.  
+
+```{r}
+# Group by `transcriptID` and `transcriptSection` and count AI_words
+Transcripts_AI_word_summary_section <- Transcripts_AI_words_df %>%
+  group_by(transcriptID, transcriptSection) %>%
+  summarize(count_AI_words = n())
+
+# Group by `transcriptID` and `transcriptSection` and count RAI_words
+Transcripts_RAI_word_summary_section <- Transcripts_RAI_words_df %>%
+  group_by(transcriptID, transcriptSection) %>%
+  summarize(count_RAI_words = n())
+
+Transcripts_sum_AI_words_section <- full_join(Transcripts_AI_word_summary_section, 
+                                              Transcripts_RAI_word_summary_section,
+                                              by = c("transcriptID", "transcriptSection"))
+
+# Join back with unique transcript per section data frame
+unique_company_transcript_section_complete <- full_join(unique_company_transcript_section,
+                                                        Transcripts_sum_AI_words_section,
+                                                        by = c("transcriptID", "transcriptSection"))
+print(unique_company_transcript_section_complete)
+
+
+# Remove unnecessary data objects 
+rm(Transcripts_AI_word_summary_section,
+   Transcripts_RAI_word_summary_section,
+   Transcripts_sum_AI_words_section,
+   Transcripts_AI_words_df,
+   Transcripts_RAI_words_df)
+
+
+```
+
+## 1.4.2 AI disclosure - two word (bigram) selection
+
+### Bag of words 
+
+https://www.lavery.ca/FTP/publication/%20Legal-Lab-Artificial-Intelligence-Lexicon.pdf
+
+https://partnershiponai.org/responsible-generative-ai-lets-get-started/
+
+https://dataconomy.com/2022/04/23/artificial-intelligence-terms-ai-glossary/?utm_content=cmp-true
+
+
+Single words
+algorithm, ML, API, AGI, AI, CPU, chatbot, gan, nlg, nlu
+
+Bigrams 
+artificial intelligence, machine learning, reinforcement learning, neural network, supervised learning, deep learning, genetic algorithm, data mining, data analysis, expert systems, data driven, speech recognition, spam detectors, image recognition, recommendation system, sentiment analysis, automated translation, computer vision
+
+
+https://www.europarl.europa.eu/RegData/etudes/BRIE/2019/640163/EPRS_BRI(2019)640163_EN.pdf
+
+https://www.virtuousai.com/blog/ethical-ai-terminology/
+
+https://www.ibm.com/topics/ai-ethics
+
+
+Defining the bag of two consecutive words related to AI disclosure. It is useful for the content analyses to also look at frequency of two consecutive words (n-grams). To assess AI disclosure, looking at two word combinations can be more appropriate, because it provides more context to the topic. It gives the opportunity to classify the form of AI talk and distinguish between types of AI talk.
+
+```{r}
+# Define the words to search for
+AI_bigram_words <- c("artificial intelligence", "machine learning", 
+                     "deep learning", "neural network", 
+                     "neural networks", "genetic algorithm",
+                     "data mining", "data architect",
+                     "data science", "data lake", "data manager", "game ai",
+                     "natural language", "computer vision",
+                     "reinforcement learning", "supervised learning",
+                     "unsupervised learning", "sentiment analysis", 
+                     "speech recognition", "image recognition", 
+                     "recommendation systems", "anomaly detection",
+                     "text classification", "data driven", "web scraper",
+                     "ai cloud", "ai capabilities")
+
+
+# Responsible AI 
+RAI_bigram_words <- c("ethical ai", "ai ethics",
+                       "responsible ai", "ai governance",
+                       "algorithmic bias", "data bias",
+                       "trustworthy ai",
+                       "ai auditing", "data protection",
+                       "ai policy", "ai regulation",
+                       "ai legislation", "human rights",
+                       "ai risks", "ai benefits", 
+                       "ai sustainability", "digital literacy")
+```
+
+
+### Find AI disclosure bigrams  
+
+```{r}
+# Filter for AI_words
+Transcripts_AI_bigram_df <- Transcripts_bigrams_united %>% 
+  filter(bigram %in% AI_bigram_words)
+
+# Filter for RAI_words
+Transcripts_RAI_bigram_df <- Transcripts_bigrams_united %>% 
+  filter(bigram %in% RAI_bigram_words)
+
+print(Transcripts_AI_bigram_df)
+print(Transcripts_RAI_bigram_df)
+```
+
+#### Plot AI bigrams disclosure  
+
+```{r}
+# Count the occurrences of bigrams and reorder them
+AI_bigram_plot <- Transcripts_AI_bigram_df %>%
+  count(bigram, sort = TRUE) %>%
+  mutate(bigram = fct_reorder(bigram, n)) %>%
+  filter(n > 60) %>%
+  ggplot(aes(x = bigram, y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(x = NULL, y = "Frequency") +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 24, hjust = 0.5)
+  ) +
+  ggtitle("AI Bigram Frequency")
+
+ggsave("Output/AI_bigram_plot.png", AI_bigram_plot, width = 10, height = 7, units = "in")
+
+# Count the occurrences of bigrams and reorder them
+RAI_bigram_plot <- Transcripts_RAI_bigram_df %>%
+  count(bigram, sort = TRUE) %>%
+  mutate(bigram = fct_reorder(bigram, n)) %>%
+  ggplot(aes(x = bigram, y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(x = NULL, y = "Frequency") +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 24, hjust = 0.5)
+  ) +
+  ggtitle("RAI Bigram Frequency")
+
+ggsave("Output/RAI_bigram_plot.png", RAI_bigram_plot, width = 10, height = 7, units = "in")
+
+AI_bigram_plot
+RAI_bigram_plot
+
+rm(AI_bigram_plot,
+   RAI_bigram_plot)
+
+```
+
+
+### Summary statistics AI bigram count
+
+#### Per transcript 
+
+Find AI disclosure, from the defined bag of words, for each transcript per company. 
+
+```{r}
+# Group by transcriptId and count AI_words
+Transcripts_AI_bigram_summary <- Transcripts_AI_bigram_df %>%
+  group_by(transcriptID) %>%
+  summarize(count_AI_bigrams = n())
+
+# Group by transcriptId and count RAI_words
+Transcripts_RAI_bigram_summary <- Transcripts_RAI_bigram_df %>%
+  group_by(transcriptID) %>%
+  summarize(count_RAI_bigrams = n())
+
+Transcripts_sum_AI_bigram <- full_join(Transcripts_AI_bigram_summary, 
+                                       Transcripts_RAI_bigram_summary,
+                                       by = c("transcriptID"))
+
+# Join back with unique transcript data frame
+unique_company_transcript_complete <- full_join(unique_company_transcript_complete,
+                                                Transcripts_sum_AI_bigram,
+                                                by = c("transcriptID"))
+
+# Print the new data frame
+print(unique_company_transcript_complete)
+
+# Remove unnecessary data objects 
+rm(Transcripts_AI_bigram_summary,
+   Transcripts_RAI_bigram_summary,
+   Transcripts_sum_AI_bigram)
+
+```
+
+#### Per component
+
+Looking for bigrams out of the bag of bigrams per component of the transcript for each company.  
+
+```{r}
+# Group by `transcriptID` and `transcriptSection` and count AI_words
+Transcripts_AI_bigram_summary_section <- Transcripts_AI_bigram_df %>%
+  group_by(transcriptID, transcriptSection) %>%
+  summarize(count_AI_bigrams = n())
+
+# Group by `transcriptID` and `transcriptSection` and count AI_words
+Transcripts_RAI_bigram_summary_section <- Transcripts_RAI_bigram_df %>%
+  group_by(transcriptID, transcriptSection) %>%
+  summarize(count_RAI_bigrams = n())
+
+Transcripts_sum_AI_bigrams_section <- full_join(Transcripts_AI_bigram_summary_section, 
+                                                Transcripts_RAI_bigram_summary_section,
+                                                by = c("transcriptID", "transcriptSection"))
+
+
+# Join back with unique transcript per section data frame
+unique_company_transcript_section_complete <- full_join(unique_company_transcript_section_complete,
+                                                        Transcripts_sum_AI_bigrams_section,
+                                                        by = c("transcriptID", "transcriptSection"))
+# Print the new data frame
+print(unique_company_transcript_section_complete)
+
+# Remove unnecessary data objects 
+rm(Transcripts_AI_bigram_summary_section,
+   Transcripts_RAI_bigram_summary_section,
+   Transcripts_sum_AI_bigrams_section,
+   Transcripts_AI_bigram_df,
+   Transcripts_RAI_bigram_df)
+
+```
+
+# 1.4 Data transformations AI words and bigrams - final transcript data set
+
+```{r}
+# Replace NA values with 0 in word count columns
+unique_company_transcript_complete <- unique_company_transcript_complete %>% 
+  mutate(across(c(count_AI_words, count_RAI_words, 
+                  count_AI_bigrams, count_RAI_bigrams),
+                ~replace(., is.na(.), 0)))
+
+# Replace NA values with 0 in word count columns - per section
+unique_company_transcript_section_complete <- unique_company_transcript_section_complete %>% 
+  mutate(across(c(count_AI_words, count_RAI_words, 
+                  count_AI_bigrams, count_RAI_bigrams),
+                ~replace(., is.na(.), 0)))
+
+# Find new column with the sum of AI words and AI bigrams, for AI and RAI 
+unique_company_transcript_complete <- unique_company_transcript_complete %>% 
+  mutate(sum_AI_count = count_AI_words + count_AI_bigrams,
+         sum_RAI_count = count_RAI_words + count_RAI_bigrams)
+
+# Find new column with the sum of AI words and AI bigrams, for AI and RAI - per section
+unique_company_transcript_section_complete <- unique_company_transcript_section_complete %>% 
+  mutate(sum_AI_count = count_AI_words + count_AI_bigrams,
+         sum_RAI_count = count_RAI_words + count_RAI_bigrams)
+
+# Print the results
+print(unique_company_transcript_complete)
+print(unique_company_transcript_section_complete)
+
+```
+
+```{r}
+# Reshape the data
+unique_company_transcript_section_complete_long <- unique_company_transcript_section_complete %>%
+  gather(key = "count_type", value = "count_value", count_AI_words:sum_RAI_count) %>%
+  unite("count_type_section", count_type, transcriptSection, sep = "_") %>%
+  spread(key = count_type_section, value = count_value)
+
+# Print the reshaped data
+print(unique_company_transcript_section_complete_long)
+
+```
+
+
+
+```{r}
+rm(unique_company_transcript,
+   unique_company_transcript_section,
+   Transcripts_G500_without_NA,
+   Transcripts_tidy_df_joined_bigram,
+   Transcripts_tidy_df_joined)
+
+
+```
+
+**Saving and loading transcript data**
+
+```{r}
+save(unique_company_transcript_complete,
+     unique_company_transcript_section_complete,
+     unique_company_transcript_section_complete_long,
+     file = "RData/Transcripts_AI.RData_20230605")
+```
+
+```{r}
+load("RData/Transcripts_AI.RData_20230605")
+```
+
+

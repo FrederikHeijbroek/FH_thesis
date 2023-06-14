@@ -1,0 +1,377 @@
+---
+title: "R Notebook - Company information and control variables"
+output: html_notebook
+author: "Frederik Heijbroek"
+---
+
+# Overview
+
+This R Notebook is for finding and data pre-processing of the control variables.
+
+# Libraries
+
+Loading packages
+
+```{r}
+if (!require("httr")) install.packages("httr")
+if (!require("jsonlite")) install.packages("jsonlite")
+if (!require("dplyr")) install.packages("dplyr")
+```
+
+```{r}
+library(httr)
+library(jsonlite)
+library(dplyr)
+```
+
+# Symbol list
+
+```{r}
+Transcripts_symbols
+```
+
+
+# 2. Extracting control variables: company information and financials
+
+**Financial Modeling Prep (FMP)** 
+
+*Key*
+
+```{r}
+# Financial Modeling Prep API key
+api_key_FMP <- "27d166fe97887d83743f46bd83773b2e"
+```
+
+https://site.financialmodelingprep.com/developer/docs/pricing/
+
+
+## 2.1 General company information - FMP
+
+**Function for extracting general company information**
+
+```{r}
+# Function to get company profile information for a symbol
+func_company_profile <- function(symbol, api_key_FMP) {
+  base_url <- "https://financialmodelingprep.com/api/v3/"
+  endpoint <- "profile"
+  
+  query_url <- paste0(base_url, endpoint, "/", symbol, "?apikey=", api_key_FMP)
+  response <- GET(query_url)
+  
+  if (http_status(response)$category == "Success") {
+    content <- fromJSON(content(response, "text", encoding = "UTF-8"))
+    
+    # Convert the content to a data frame
+    company_profile <- data.frame(content)
+    
+    return(company_profile)
+  } else {
+    warning(paste0("Failed to fetch data for ", symbol))
+    return(NULL)
+  }
+}
+
+```
+
+Looping through the symbols universe
+
+```{r}
+# Retrieve company profile data for all symbols
+company_profiles_list_transcripts <- lapply(Transcripts_symbols, function(symbol) {
+  cat("Fetching data for", symbol, "\n")
+  company_profile <- func_company_profile(symbol, api_key_FMP)
+  
+  # Add a sleep time (2 seconds) to avoid hitting the API rate limits
+  Sys.sleep(0.5)
+  
+  return(company_profile)
+})
+
+```
+
+```{r}
+# Combine the company profile data frames
+company_profiles_df_transcripts <- do.call(rbind, company_profiles_list_transcripts)
+
+```
+
+### Find list with exchange market names 
+
+**exchange markets**
+
+```{r}
+unique_exchange <- unique(company_profiles_df_transcripts$exchangeShortName)
+unique_exchange
+
+```
+
+## 2.2 Financial information - FMP
+
+**Function to retrieve financial information data**
+
+```{r}
+# Function to get historical financial ratios for a symbol
+func_financial_ratios <- function(symbol, api_key_FMP) {
+  base_url <- "https://financialmodelingprep.com/api/v3/"
+  endpoint <- "ratios"
+
+  # Calculate the dates for the last five years
+  to_date <- Sys.Date()
+  from_date <- to_date - 7 * 365
+
+  # Include the period parameter and set it to "quarter"
+  query_url <- paste0(base_url, endpoint, "/", symbol, "?period=quarter&apikey=", api_key_FMP)
+  response <- GET(query_url)
+
+  if (http_status(response)$category == "Success") {
+    content <- fromJSON(content(response, "text", encoding = "UTF-8"))
+
+    # Convert the content to a data frame
+    financial_ratios <- data.frame(content)
+
+    return(financial_ratios)
+  } else {
+    warning(paste0("Failed to fetch data for ", symbol))
+    return(NULL)
+  }
+}
+
+```
+
+```{r}
+# Retrieve historical financial ratios data for all symbols
+financial_ratios_list_transcripts <- lapply(Transcripts_symbols, function(symbol) { # symbol universe
+  cat("Fetching data for", symbol, "\n")
+  financial_ratios <- func_financial_ratios(symbol, api_key_FMP)
+  
+  # Add a sleep time (0.3 seconds) to avoid hitting the API rate limits
+  Sys.sleep(0.3)
+  
+  return(financial_ratios)
+})
+
+```
+
+```{r}
+# Combine the financial ratios data frames
+financial_ratios_df_transcripts <- do.call(rbind, financial_ratios_list_transcripts)
+financial_ratios_df_transcripts <- financial_ratios_df_transcripts[financial_ratios_df_transcripts$date > (Sys.Date() - 7*365), ]
+
+```
+
+**Test API functioning**
+
+```{r}
+symbol <- "MSFT"
+base_url <- "https://financialmodelingprep.com/api/v3/"
+endpoint <- "ratios"
+query_url <- paste0(base_url, endpoint, "/", symbol, "?apikey=", api_key_FMP)
+response <- GET(query_url)
+print(http_status(response))
+print(content(response, "text", encoding = "UTF-8"))
+
+```
+
+
+## 2.3 Earnings report information - FMP
+
+```{r}
+func_earnings_report <- function(symbol, api_key_FMP) {
+  base_url <- "https://financialmodelingprep.com/api/v3/"
+  endpoint <- "income-statement"
+
+  # Calculate the dates for the last seven years
+  to_date <- Sys.Date()
+  from_date <- to_date - 7 * 365
+
+  # Convert dates to character and include the period parameter set to "quarter"
+  query_url <- paste0(base_url, endpoint, "/", symbol, "?from=", as.character(from_date), "&to=", as.character(to_date), "&period=quarter&apikey=", api_key_FMP)
+  response <- GET(query_url)
+
+  if (http_status(response)$category == "Success") {
+    content <- fromJSON(content(response, "text", encoding = "UTF-8"))
+
+    # Convert the content to a data frame
+    earnings_report <- data.frame(content)
+
+    return(earnings_report)
+  } else {
+    warning(paste0("Failed to fetch data for ", symbol))
+    return(NULL)
+  }
+}
+
+```
+
+```{r}
+# Retrieve historical earnings report data for all symbols
+earnings_report_list_transcripts <- lapply(Transcripts_symbols, function(symbol) { # symbol universe
+  cat("Fetching data for", symbol, "\n")
+  earnings_report <- func_earnings_report(symbol, api_key_FMP)
+  
+  # Add a sleep time (0.5 seconds) to avoid hitting the API rate limits
+  Sys.sleep(0.5)
+  
+  return(earnings_report)
+})
+
+```
+
+```{r}
+# Combine the earnings report data frames
+earnings_report_df_transcripts <- do.call(rbind, earnings_report_list_transcripts)
+earnings_report_df_transcripts <- earnings_report_df_transcripts[earnings_report_df_transcripts$date > (Sys.Date() - 7*365), ]
+```
+
+```{r}
+length(unique(earnings_report_df_transcripts$symbol)) # 363 unique companies
+```
+
+
+## 2.4 EPS data Alpha vantage
+
+```{r}
+# Alpha Vantage API key
+api_key_AV <- "ENIQNI8C67KARI4G"
+
+```
+
+https://www.alphavantage.co/documentation/
+
+Function to retrieve company information data from Alpha Vantage
+- 500 requests / day 
+
+
+```{r}
+# Define the function to get EPS data
+func_eps <- function(symbol, api_key_AV) {
+  
+  # Define the API URL
+  api_url <- paste0('https://www.alphavantage.co/query?function=EARNINGS&symbol=', symbol, '&apikey=', api_key_AV)
+  
+  # Get the data from the API
+  response <- GET(api_url)
+  
+  if (http_status(response)$category == "Success") {
+    # Parse the JSON content from the API response
+    content <- fromJSON(content(response, "text", encoding = "UTF-8"))
+
+    # Convert the quarterly earnings data to a data frame and add symbol column
+    earnings_df <- data.frame(content$quarterlyEarnings)
+    
+    if(nrow(earnings_df) > 0) {
+      earnings_df$symbol <- symbol
+      # Reorder columns to put symbol first
+      earnings_df <- earnings_df[, c("symbol", setdiff(names(earnings_df), "symbol"))]
+    } else {
+      warning(paste0("No data available for ", symbol))
+    }
+    
+    return(earnings_df)
+  } else {
+    warning(paste0("Failed to fetch data for ", symbol))
+    return(NULL)
+  }
+}
+
+```
+
+
+```{r}
+# Retrieve earnings data for all symbols
+eps_list <- lapply(Transcripts_symbols, function(symbol) {
+  
+  cat("Fetching data for", symbol, "\n")
+  earnings_df <- func_eps(symbol, api_key_AV)
+  
+  # Add a sleep time (12 seconds) to avoid hitting the API rate limits
+  Sys.sleep(12)
+  
+  return(earnings_df)
+})
+
+```
+
+```{r}
+# Bind all the earnings data frames together
+eps_df <- do.call(rbind, eps_list)
+
+eps_df <- eps_df[eps_df$fiscalDateEnding > (Sys.Date() - 7*365), ]
+
+# Print the earnings dataframe
+print(eps_df)
+
+```
+
+```{r}
+eps_df %>% 
+  group_by(symbol) %>% 
+  summarise(count = n()) %>% 
+  nrow()
+
+```
+
+
+## 2.5 Data transformations
+
+### Finacial ratio's 
+
+```{r}
+financial_ratios_df_transcripts <- financial_ratios_df_transcripts %>% 
+  mutate(period_n = as.numeric(str_extract(period, "\\d")))
+```
+
+```{r}
+# Change data types
+# financial_ratios_df_transcripts$acceptedDate <- as.POSIXct(financial_ratios_df_transcripts$acceptedDate, format = "%Y-%m-%d %H:%M:%S")
+# financial_ratios_df_transcripts$acceptedDate <- as.Date(force_tz(financial_ratios_df_transcripts$acceptedDate), tzone = "US/Eastern")
+
+financial_ratios_df_transcripts$date <- as.Date(financial_ratios_df_transcripts$date)
+```
+
+
+### Earnings report data
+
+```{r}
+# Change data types
+earnings_report_df_transcripts$acceptedDate <- as.POSIXct(earnings_report_df_transcripts$acceptedDate, format = "%Y-%m-%d %H:%M:%S")
+earnings_report_df_transcripts$acceptedDate <- as.Date(force_tz(earnings_report_df_transcripts$acceptedDate), tzone = "US/Eastern")
+
+earnings_report_df_transcripts$date <- as.Date(earnings_report_df_transcripts$date)
+earnings_report_df_transcripts$fillingDate <- as.Date(earnings_report_df_transcripts$fillingDate)
+
+# Split `calendarYear` column
+earnings_report_df_transcripts <- earnings_report_df_transcripts %>% 
+  mutate(quarter = as.numeric(str_extract(period, "\\d")),
+         year = as.numeric(calendarYear)) 
+
+```
+
+### EPS data
+
+```{r}
+eps_df$fiscalDateEnding <- as.Date(eps_df$fiscalDateEnding)
+eps_df$reportedDate <- as.Date(eps_df$reportedDate)
+reportedDate
+
+```
+
+**Save and load the data**
+
+```{r}
+save(financial_ratios_df_transcripts,
+     company_profiles_df_transcripts,
+     earnings_report_df_transcripts,
+     eps_df,
+     file = "RData/Controls.RData")
+
+```
+
+```{r}
+load("RData/Controls.RData")
+```
+
+## 2.6 Merging steps 
+
+See `Stocks` notebook 
+
